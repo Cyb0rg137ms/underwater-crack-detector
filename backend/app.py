@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import os
 import torch
@@ -17,8 +17,8 @@ from skimage.morphology import remove_small_objects
 
 # Initialize Flask app
 app = Flask(__name__, 
-    static_folder='static',
-    template_folder='build')
+    static_folder='build',  # Serve static files from backend/build
+    static_url_path='/')    # Root URL serves from build folder
 CORS(app)
 
 # Configure upload folder
@@ -36,7 +36,7 @@ print(f"Using device: {device}")
 # Global model variables
 crack_model = None
 
-# Model Architecture
+# Model Architecture (unchanged from your code)
 class HLFSBlock(nn.Module):
     def __init__(self, in_channels, out_channels, dilation_rates=[1, 2]):
         super().__init__()
@@ -126,7 +126,6 @@ class CrackDetectionNetwork(nn.Module):
         self.decoder1 = HLFSBlock(128, 64)
         self.output = nn.Conv2d(64, out_channels, kernel_size=1)
 
-        # Ensure all parameters are contiguous
         for param in self.parameters():
             param.data = param.data.contiguous()
 
@@ -154,24 +153,16 @@ class CrackDetectionNetwork(nn.Module):
 def load_models():
     global crack_model
     
-    # Load crack detection model
     model_path = os.path.join(MODELS_FOLDER, 'crack_detector_weights.pth')
     if os.path.exists(model_path):
         try:
             print(f"Loading model from {model_path}")
-            
-            # Initialize the model with the correct architecture
             crack_model = CrackDetectionNetwork()
-            
-            # Load the state dict
             checkpoint = torch.load(model_path, map_location=device)
             if "model_state_dict" in checkpoint:
-                # If the file is a checkpoint dict with 'model_state_dict' key
                 crack_model.load_state_dict(checkpoint["model_state_dict"])
             else:
-                # If the file is just the state dict itself
                 crack_model.load_state_dict(checkpoint)
-                
             crack_model.to(device)
             crack_model.eval()
             print("Crack detection model loaded successfully")
@@ -182,14 +173,11 @@ def load_models():
         print(f"Model file not found at {model_path}")
         crack_model = None
 
-# Preprocessing 
+# Preprocessing
 def preprocess_image(image):
-    """Preprocess image for model inference"""
-    # Convert to PIL image if it's a NumPy array
     if isinstance(image, np.ndarray):
         image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
     
-    # Apply CLAHE enhancement
     img_np = np.array(image)
     lab = cv2.cvtColor(img_np, cv2.COLOR_RGB2LAB)
     l, a, b = cv2.split(lab)
@@ -199,7 +187,6 @@ def preprocess_image(image):
     img_np = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
     enhanced_image = Image.fromarray(img_np)
     
-    # Apply transformation
     transform = transforms.Compose([
         transforms.Resize((256, 256)),
         transforms.ToTensor(),
@@ -210,7 +197,6 @@ def preprocess_image(image):
 
 # Post-processing
 def advanced_post_processing(mask, min_size=30, threshold=0.5):
-    """Apply post-processing to the model output mask"""
     binary_mask = (mask > threshold).astype(np.uint8)
     cleaned = remove_small_objects(binary_mask.astype(bool), min_size=min_size)
     kernel = np.ones((3, 3), np.uint8)
@@ -219,7 +205,6 @@ def advanced_post_processing(mask, min_size=30, threshold=0.5):
 
 # Analyze crack severity
 def analyze_crack_severity(mask):
-    """Analyze crack severity from mask"""
     crack_area = np.sum(mask)
     total_area = mask.size
     percentage = (crack_area / total_area) * 100
@@ -248,64 +233,50 @@ def analyze_crack_severity(mask):
 
 # Process image and detect cracks
 def process_image(image_path, threshold=0.5, min_size=30):
-    # Read image
     image = cv2.imread(image_path)
     if image is None:
         return None, "Failed to load image"
     
-    # Check if model is loaded
     if crack_model is None:
         return None, "Model not loaded"
     
-    # Preprocess image
     image_tensor, enhanced_image = preprocess_image(image)
     image_tensor = image_tensor.to(device)
     
-    # Run inference
     with torch.no_grad():
         logits = crack_model(image_tensor)
         probabilities = torch.sigmoid(logits)
         mask = probabilities.squeeze().cpu().numpy()
     
-    # Post-process
     processed_mask = advanced_post_processing(mask, min_size, threshold)
     
-    # Analyze crack severity
     result_text, percentage, contours, severity = analyze_crack_severity(processed_mask)
     
-    # Prepare visualization
     original = np.array(enhanced_image.resize((256, 256)))
     result_image = original.copy()
     
-    # Color-code based on severity
     color_map = {0: (0, 255, 0), 1: (255, 255, 0), 2: (0, 165, 255), 3: (0, 0, 255)}
     color = color_map[severity]
     
-    # Draw contours
     if contours:
         cv2.drawContours(result_image, contours, -1, color, 2)
     
-    # Create overlay with crack areas
     overlay = result_image.copy()
     for c in range(3):
         overlay[:,:,c] = np.where(processed_mask > 0, color[c], overlay[:,:,c])
     
-    # Blend overlay with original
     alpha = 0.3
     result_image = cv2.addWeighted(overlay, alpha, result_image, 1 - alpha, 0)
     
-    # Generate unique result filename
     result_filename = f"result_{uuid.uuid4()}.jpg"
     result_path = os.path.join(RESULTS_FOLDER, result_filename)
     
-    # Save result image
     cv2.imwrite(result_path, cv2.cvtColor(result_image, cv2.COLOR_RGB2BGR))
     
-    # Prepare results for frontend
     results = {
         'id': 1,
-        'width': round(percentage * 0.1, 2),  # Approximate width based on percentage
-        'height': round(percentage * 0.05, 2),  # Approximate height
+        'width': round(percentage * 0.1, 2),
+        'height': round(percentage * 0.05, 2),
         'position': {
             'x': 0,
             'y': 0,
@@ -320,27 +291,22 @@ def process_image(image_path, threshold=0.5, min_size=30):
 
 # Process video
 def process_video(video_path, threshold=0.5, min_size=30):
-    # Open video
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         return None, "Failed to open video"
     
-    # Get video properties
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS)
     
-    # Generate unique result filename
     result_filename = f"result_{uuid.uuid4()}.mp4"
     result_path = os.path.join(RESULTS_FOLDER, result_filename)
     
-    # Create video writer
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(result_path, fourcc, fps, (256, 256))
     
-    # Process frames
     frame_count = 0
-    max_frames = 300  # Limit to prevent very long processing
+    max_frames = 300
     all_results = []
     
     while cap.isOpened() and frame_count < max_frames:
@@ -348,46 +314,35 @@ def process_video(video_path, threshold=0.5, min_size=30):
         if not ret:
             break
         
-        # Process every 5 frames to speed up
         if frame_count % 5 == 0:
-            # Preprocess frame
             image_tensor, enhanced_image = preprocess_image(frame)
             image_tensor = image_tensor.to(device)
             
-            # Run inference
             with torch.no_grad():
                 logits = crack_model(image_tensor)
                 probabilities = torch.sigmoid(logits)
                 mask = probabilities.squeeze().cpu().numpy()
             
-            # Post-process
             processed_mask = advanced_post_processing(mask, min_size, threshold)
             
-            # Analyze crack severity
             result_text, percentage, contours, severity = analyze_crack_severity(processed_mask)
             
-            # Convert enhanced image to numpy for visualization
             original = np.array(enhanced_image)
             result_image = original.copy()
             
-            # Color-code based on severity
             color_map = {0: (0, 255, 0), 1: (255, 255, 0), 2: (0, 165, 255), 3: (0, 0, 255)}
             color = color_map[severity]
             
-            # Draw contours
             if contours:
                 cv2.drawContours(result_image, contours, -1, color, 2)
             
-            # Create overlay with crack areas
             overlay = result_image.copy()
             for c in range(3):
                 overlay[:,:,c] = np.where(processed_mask > 0, color[c], overlay[:,:,c])
             
-            # Blend overlay with original
             alpha = 0.3
             result_image = cv2.addWeighted(overlay, alpha, result_image, 1 - alpha, 0)
             
-            # Add result to frame
             if severity > 0:
                 result = {
                     'id': len(all_results) + 1,
@@ -404,16 +359,13 @@ def process_video(video_path, threshold=0.5, min_size=30):
                 }
                 all_results.append(result)
             
-            # Write frame to output
             out.write(cv2.resize(result_image, (256, 256)))
         else:
-            # For skipped frames, just resize and write
             resized_frame = cv2.resize(frame, (256, 256))
             out.write(resized_frame)
         
         frame_count += 1
     
-    # Release resources
     cap.release()
     out.release()
     
@@ -421,8 +373,12 @@ def process_video(video_path, threshold=0.5, min_size=30):
 
 # API Routes
 @app.route('/')
-def index():
-    return render_template('index.html')
+def serve():
+    return send_from_directory(app.static_folder, 'index.html')
+
+@app.route('/static/<path:path>')
+def send_static(path):
+    return send_from_directory(app.static_folder + '/static', path)
 
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
@@ -540,4 +496,5 @@ with app.app_context():
 
 # Main entry point
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    port = int(os.getenv('PORT', 5000))  # Use Render's PORT or default to 5000
+    app.run(host='0.0.0.0', port=port, debug=False)  # Debug off for production
