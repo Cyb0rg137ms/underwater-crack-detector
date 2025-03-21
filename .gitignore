@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+env/
+
+# Node.js
+frontend/node_modules/
+npm-debug.log
+
+# Project specific
+backend/uploads/*
+backend/static/results/*
+
+# Environment
+.env
