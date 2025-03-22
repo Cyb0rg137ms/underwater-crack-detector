@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, render_template
 from flask_cors import CORS
 import os
 import torch
@@ -14,11 +14,20 @@ import uuid
 import json
 from datetime import datetime
 from skimage.morphology import remove_small_objects
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, 
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Get port from environment variable (for Render.com)
+port = int(os.environ.get("PORT", 5000))
 
 # Initialize Flask app
 app = Flask(__name__, 
     static_folder='build',  # Serve static files from backend/build
-    static_url_path='/')    # Root URL serves from build folder
+    template_folder='build') # Serve HTML from backend/build
 CORS(app)
 
 # Configure upload folder
@@ -28,10 +37,11 @@ MODELS_FOLDER = 'models'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(RESULTS_FOLDER, exist_ok=True)
 os.makedirs(MODELS_FOLDER, exist_ok=True)
+os.makedirs('static', exist_ok=True)
 
 # Set device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
+logger.info(f"Using device: {device}")
 
 # Global model variables
 crack_model = None
@@ -156,7 +166,11 @@ def load_models():
     model_path = os.path.join(MODELS_FOLDER, 'crack_detector_weights.pth')
     if os.path.exists(model_path):
         try:
-            print(f"Loading model from {model_path}")
+            logger.info(f"Loading model from {model_path}")
+            # Check file size to make sure it's valid
+            file_size = os.path.getsize(model_path)
+            logger.info(f"Model file size: {file_size / (1024*1024):.2f} MB")
+            
             crack_model = CrackDetectionNetwork()
             checkpoint = torch.load(model_path, map_location=device)
             if "model_state_dict" in checkpoint:
@@ -165,13 +179,34 @@ def load_models():
                 crack_model.load_state_dict(checkpoint)
             crack_model.to(device)
             crack_model.eval()
-            print("Crack detection model loaded successfully")
+            logger.info("Crack detection model loaded successfully")
         except Exception as e:
-            print(f"Error loading crack model: {e}")
+            logger.error(f"Error loading crack model: {e}")
             crack_model = None
     else:
-        print(f"Model file not found at {model_path}")
+        logger.warning(f"Model file not found at {model_path}")
         crack_model = None
+
+# Initialize function
+def initialize():
+    # Check build folder
+    if not os.path.exists('build'):
+        logger.warning("Build folder not found! Frontend assets might be missing.")
+    else:
+        if os.path.exists('build/index.html'):
+            logger.info("Frontend build found and ready")
+        else:
+            logger.warning("index.html not found in build folder!")
+    
+    # Check if model file exists
+    model_path = os.path.join(MODELS_FOLDER, 'crack_detector_weights.pth')
+    if not os.path.exists(model_path):
+        logger.warning(f"Model file not found at {model_path}")
+    else:
+        logger.info(f"Model file found at {model_path} with size {os.path.getsize(model_path)} bytes")
+    
+    # Load models
+    load_models()
 
 # Preprocessing
 def preprocess_image(image):
@@ -218,8 +253,6 @@ def analyze_crack_severity(mask):
         return "No significant cracks", 0.0, [], 0
     
     max_length = max(lengths)
-    total_length = sum(lengths)
-    num_significant = len(lengths)
     severity_score = (percentage * 0.4) + (max_length / 100) * 0.6
     
     if severity_score > 2.0 or max_length > 70:
@@ -372,13 +405,19 @@ def process_video(video_path, threshold=0.5, min_size=30):
     return f"/results/{result_filename}", all_results
 
 # API Routes
-@app.route('/')
-def serve():
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def serve(path):
+    # Special route to serve static assets
+    if path.startswith('static/'):
+        return send_from_directory('.', path)
+    
+    # Check if path exists as a file in build directory
+    if path and os.path.exists(os.path.join(app.static_folder, path)):
+        return send_from_directory(app.static_folder, path)
+    
+    # Default: serve index.html
     return send_from_directory(app.static_folder, 'index.html')
-
-@app.route('/static/<path:path>')
-def send_static(path):
-    return send_from_directory(app.static_folder + '/static', path)
 
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
@@ -418,6 +457,7 @@ def upload_file():
         })
     
     except Exception as e:
+        logger.error(f"Error processing file: {str(e)}")
         if os.path.exists(file_path):
             os.remove(file_path)
         return jsonify({'error': str(e)}), 500
@@ -455,6 +495,7 @@ def process_camera():
         })
     
     except Exception as e:
+        logger.error(f"Error processing camera image: {str(e)}")
         if os.path.exists(file_path):
             os.remove(file_path)
         return jsonify({'error': str(e)}), 500
@@ -477,24 +518,23 @@ def update_model():
     
     # Verify file was saved
     file_size = os.path.getsize(model_path)
-    print(f"Model file saved at {model_path} with size {file_size} bytes")
+    logger.info(f"Model file saved at {model_path} with size {file_size} bytes")
     
     try:
         # Reload models
         load_models()
         return jsonify({'message': f'Model updated successfully. File size: {file_size} bytes'})
     except Exception as e:
+        logger.error(f"Error updating model: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/results/<path:filename>')
 def result_file(filename):
     return send_from_directory(RESULTS_FOLDER, filename)
 
-# Initialize models on startup
-with app.app_context():
-    load_models()
+# Initialize the app
+initialize()
 
-# Main entry point
-if __name__ == '__main__':
-    port = int(os.getenv('PORT', 5000))  # Use Render's PORT or default to 5000
-    app.run(host='0.0.0.0', port=port, debug=False)  # Debug off for production
+# Gunicorn configuration for Render
+if __name__ == "__main__":
+    app.run(host='0.0.0.0', port=port)
