@@ -404,133 +404,32 @@ def process_video(video_path, threshold=0.5, min_size=30):
     
     return f"/results/{result_filename}", all_results
 
+# Change this part in your app.py
+# Replace the existing routes with these simplified ones
+
 # API Routes
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
-def serve(path):
-    # Special route to serve static assets
-    if path.startswith('static/'):
-        return send_from_directory('.', path)
-    
-    # Check if path exists as a file in build directory
-    if path and os.path.exists(os.path.join(app.static_folder, path)):
-        return send_from_directory(app.static_folder, path)
-    
-    # Default: serve index.html
-    return send_from_directory(app.static_folder, 'index.html')
-
-@app.route('/api/upload', methods=['POST'])
-def upload_file():
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file part'}), 400
-    
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({'error': 'No selected file'}), 400
-    
-    # Get parameters
-    threshold = float(request.form.get('threshold', 0.5))
-    min_size = int(request.form.get('min_size', 30))
-    
-    # Save uploaded file
-    file_path = os.path.join(UPLOAD_FOLDER, str(uuid.uuid4()) + '_' + file.filename)
-    file.save(file_path)
-    
-    try:
-        # Process file based on type
-        if file.filename.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp')):
-            result_path, detections = process_image(file_path, threshold, min_size)
-        elif file.filename.lower().endswith(('.mp4', '.avi', '.mov')):
-            result_path, detections = process_video(file_path, threshold, min_size)
-        else:
-            return jsonify({'error': 'Unsupported file type'}), 400
+def catch_all(path):
+    # Add simple health check endpoint for debugging
+    if path == "health":
+        return jsonify({"status": "healthy"})
         
-        # Clean up
-        if os.path.exists(file_path):
-            os.remove(file_path)
+    # For API endpoints
+    if path.startswith('api/'):
+        # These will be handled by their specific route handlers
+        return app.view_functions[path.split('/')[-1]](path)
         
-        return jsonify({
-            'success': True,
-            'result': result_path,
-            'detections': detections,
-            'timestamp': datetime.now().isoformat()
-        })
-    
-    except Exception as e:
-        logger.error(f"Error processing file: {str(e)}")
-        if os.path.exists(file_path):
-            os.remove(file_path)
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/camera', methods=['POST'])
-def process_camera():
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file part'}), 400
-    
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({'error': 'No captured image'}), 400
-    
-    # Get parameters
-    threshold = float(request.form.get('threshold', 0.5))
-    min_size = int(request.form.get('min_size', 30))
-    
-    # Save captured image
-    file_path = os.path.join(UPLOAD_FOLDER, f"camera_{uuid.uuid4()}.jpg")
-    file.save(file_path)
-    
-    try:
-        # Process image
-        result_path, detections = process_image(file_path, threshold, min_size)
+    # For result images
+    if path.startswith('results/'):
+        return send_from_directory('static/results', path.replace('results/', ''))
         
-        # Clean up
-        if os.path.exists(file_path):
-            os.remove(file_path)
+    # For other static files (JS, CSS, etc.)
+    if path and os.path.exists(os.path.join('build', path)):
+        return send_from_directory('build', path)
         
-        return jsonify({
-            'success': True,
-            'result': result_path,
-            'detections': detections,
-            'timestamp': datetime.now().isoformat()
-        })
-    
-    except Exception as e:
-        logger.error(f"Error processing camera image: {str(e)}")
-        if os.path.exists(file_path):
-            os.remove(file_path)
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/update_model', methods=['POST'])
-def update_model():
-    if 'model' not in request.files:
-        return jsonify({'error': 'No model file part'}), 400
-    
-    model_file = request.files['model']
-    if model_file.filename == '':
-        return jsonify({'error': 'No selected model file'}), 400
-    
-    if not model_file.filename.endswith('.pth'):
-        return jsonify({'error': 'Invalid model file format'}), 400
-    
-    # Save model file
-    model_path = os.path.join(MODELS_FOLDER, 'crack_detector_weights.pth')
-    model_file.save(model_path)
-    
-    # Verify file was saved
-    file_size = os.path.getsize(model_path)
-    logger.info(f"Model file saved at {model_path} with size {file_size} bytes")
-    
-    try:
-        # Reload models
-        load_models()
-        return jsonify({'message': f'Model updated successfully. File size: {file_size} bytes'})
-    except Exception as e:
-        logger.error(f"Error updating model: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/results/<path:filename>')
-def result_file(filename):
-    return send_from_directory(RESULTS_FOLDER, filename)
+    # Default: serve index.html for client-side routing
+    return send_from_directory('build', 'index.html')
 
 # Initialize the app
 initialize()
