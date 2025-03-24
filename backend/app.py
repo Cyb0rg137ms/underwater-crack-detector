@@ -26,11 +26,11 @@ port = int(os.environ.get("PORT", 5000))
 
 # Initialize Flask app
 app = Flask(__name__, 
-    static_folder='build',  # Serve static files from backend/build
-    template_folder='build') # Serve HTML from backend/build
-CORS(app)
+    static_folder='build/static',  # Serve static files from build/static
+    template_folder='build')       # Serve HTML from build
+CORS(app, resources={r"/api/*": {"origins": "*"}})  # Allow CORS for API routes
 
-# Configure upload folder
+# Configure folders
 UPLOAD_FOLDER = 'uploads'
 RESULTS_FOLDER = 'static/results'
 MODELS_FOLDER = 'models'
@@ -46,7 +46,7 @@ logger.info(f"Using device: {device}")
 # Global model variables
 crack_model = None
 
-# Model Architecture (unchanged from your code)
+# Model Architecture (unchanged)
 class HLFSBlock(nn.Module):
     def __init__(self, in_channels, out_channels, dilation_rates=[1, 2]):
         super().__init__()
@@ -162,15 +162,12 @@ class CrackDetectionNetwork(nn.Module):
 # Load models
 def load_models():
     global crack_model
-    
     model_path = os.path.join(MODELS_FOLDER, 'crack_detector_weights.pth')
     if os.path.exists(model_path):
         try:
             logger.info(f"Loading model from {model_path}")
-            # Check file size to make sure it's valid
             file_size = os.path.getsize(model_path)
             logger.info(f"Model file size: {file_size / (1024*1024):.2f} MB")
-            
             crack_model = CrackDetectionNetwork()
             checkpoint = torch.load(model_path, map_location=device)
             if "model_state_dict" in checkpoint:
@@ -189,7 +186,6 @@ def load_models():
 
 # Initialize function
 def initialize():
-    # Check build folder
     if not os.path.exists('build'):
         logger.warning("Build folder not found! Frontend assets might be missing.")
     else:
@@ -197,22 +193,17 @@ def initialize():
             logger.info("Frontend build found and ready")
         else:
             logger.warning("index.html not found in build folder!")
-    
-    # Check if model file exists
     model_path = os.path.join(MODELS_FOLDER, 'crack_detector_weights.pth')
     if not os.path.exists(model_path):
         logger.warning(f"Model file not found at {model_path}")
     else:
         logger.info(f"Model file found at {model_path} with size {os.path.getsize(model_path)} bytes")
-    
-    # Load models
     load_models()
 
 # Preprocessing
 def preprocess_image(image):
     if isinstance(image, np.ndarray):
         image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-    
     img_np = np.array(image)
     lab = cv2.cvtColor(img_np, cv2.COLOR_RGB2LAB)
     l, a, b = cv2.split(lab)
@@ -221,13 +212,11 @@ def preprocess_image(image):
     lab = cv2.merge((l, a, b))
     img_np = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
     enhanced_image = Image.fromarray(img_np)
-    
     transform = transforms.Compose([
         transforms.Resize((256, 256)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
-    
     return transform(enhanced_image).unsqueeze(0), enhanced_image
 
 # Post-processing
@@ -244,17 +233,13 @@ def analyze_crack_severity(mask):
     total_area = mask.size
     percentage = (crack_area / total_area) * 100
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
     if not contours:
         return "No cracks", 0.0, [], 0
-    
     lengths = [cv2.arcLength(c, True) for c in contours if cv2.contourArea(c) > 5]
     if not lengths:
         return "No significant cracks", 0.0, [], 0
-    
     max_length = max(lengths)
     severity_score = (percentage * 0.4) + (max_length / 100) * 0.6
-    
     if severity_score > 2.0 or max_length > 70:
         return "Critical cracks", percentage, contours, 3
     elif severity_score > 1.0 or max_length > 40:
@@ -264,176 +249,181 @@ def analyze_crack_severity(mask):
     else:
         return "Negligible cracks", percentage, contours, 0
 
-# Process image and detect cracks
+# Process image
 def process_image(image_path, threshold=0.5, min_size=30):
+    logger.info(f"Processing image: {image_path}")
     image = cv2.imread(image_path)
     if image is None:
+        logger.error(f"Failed to load image: {image_path}")
         return None, "Failed to load image"
-    
     if crack_model is None:
+        logger.error("Crack detection model not loaded")
         return None, "Model not loaded"
-    
     image_tensor, enhanced_image = preprocess_image(image)
     image_tensor = image_tensor.to(device)
-    
     with torch.no_grad():
         logits = crack_model(image_tensor)
         probabilities = torch.sigmoid(logits)
         mask = probabilities.squeeze().cpu().numpy()
-    
     processed_mask = advanced_post_processing(mask, min_size, threshold)
-    
     result_text, percentage, contours, severity = analyze_crack_severity(processed_mask)
-    
     original = np.array(enhanced_image.resize((256, 256)))
     result_image = original.copy()
-    
     color_map = {0: (0, 255, 0), 1: (255, 255, 0), 2: (0, 165, 255), 3: (0, 0, 255)}
     color = color_map[severity]
-    
     if contours:
         cv2.drawContours(result_image, contours, -1, color, 2)
-    
     overlay = result_image.copy()
     for c in range(3):
         overlay[:,:,c] = np.where(processed_mask > 0, color[c], overlay[:,:,c])
-    
     alpha = 0.3
     result_image = cv2.addWeighted(overlay, alpha, result_image, 1 - alpha, 0)
-    
     result_filename = f"result_{uuid.uuid4()}.jpg"
     result_path = os.path.join(RESULTS_FOLDER, result_filename)
-    
     cv2.imwrite(result_path, cv2.cvtColor(result_image, cv2.COLOR_RGB2BGR))
-    
     results = {
         'id': 1,
         'width': round(percentage * 0.1, 2),
         'height': round(percentage * 0.05, 2),
-        'position': {
-            'x': 0,
-            'y': 0,
-            'w': 256,
-            'h': 256
-        },
+        'position': {'x': 0, 'y': 0, 'w': 256, 'h': 256},
         'confidence': float(percentage / 100),
         'severity': ["negligible", "minor", "moderate", "critical"][severity]
     }
-    
     return f"/results/{result_filename}", [results] if severity > 0 else []
 
 # Process video
 def process_video(video_path, threshold=0.5, min_size=30):
+    logger.info(f"Processing video: {video_path}")
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
+        logger.error(f"Failed to open video: {video_path}")
         return None, "Failed to open video"
-    
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS)
-    
     result_filename = f"result_{uuid.uuid4()}.mp4"
     result_path = os.path.join(RESULTS_FOLDER, result_filename)
-    
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(result_path, fourcc, fps, (256, 256))
-    
     frame_count = 0
     max_frames = 300
     all_results = []
-    
     while cap.isOpened() and frame_count < max_frames:
         ret, frame = cap.read()
         if not ret:
             break
-        
         if frame_count % 5 == 0:
             image_tensor, enhanced_image = preprocess_image(frame)
             image_tensor = image_tensor.to(device)
-            
             with torch.no_grad():
                 logits = crack_model(image_tensor)
                 probabilities = torch.sigmoid(logits)
                 mask = probabilities.squeeze().cpu().numpy()
-            
             processed_mask = advanced_post_processing(mask, min_size, threshold)
-            
             result_text, percentage, contours, severity = analyze_crack_severity(processed_mask)
-            
             original = np.array(enhanced_image)
             result_image = original.copy()
-            
             color_map = {0: (0, 255, 0), 1: (255, 255, 0), 2: (0, 165, 255), 3: (0, 0, 255)}
             color = color_map[severity]
-            
             if contours:
                 cv2.drawContours(result_image, contours, -1, color, 2)
-            
             overlay = result_image.copy()
             for c in range(3):
                 overlay[:,:,c] = np.where(processed_mask > 0, color[c], overlay[:,:,c])
-            
             alpha = 0.3
             result_image = cv2.addWeighted(overlay, alpha, result_image, 1 - alpha, 0)
-            
             if severity > 0:
                 result = {
                     'id': len(all_results) + 1,
                     'width': round(percentage * 0.1, 2),
                     'height': round(percentage * 0.05, 2),
-                    'position': {
-                        'x': 0,
-                        'y': 0,
-                        'w': 256,
-                        'h': 256
-                    },
+                    'position': {'x': 0, 'y': 0, 'w': 256, 'h': 256},
                     'confidence': float(percentage / 100),
                     'severity': ["negligible", "minor", "moderate", "critical"][severity]
                 }
                 all_results.append(result)
-            
             out.write(cv2.resize(result_image, (256, 256)))
         else:
             resized_frame = cv2.resize(frame, (256, 256))
             out.write(resized_frame)
-        
         frame_count += 1
-    
     cap.release()
     out.release()
-    
     return f"/results/{result_filename}", all_results
 
-# Change this part in your app.py
-# Replace the existing routes with these simplified ones
+# ... (previous imports and code remain unchanged up to routes) ...
 
-# API Routes
+# API Routes (place these BEFORE the catch-all route)
+@app.route('/api/upload', methods=['POST'])
+def upload_file():
+    logger.info("Received upload request")
+    if 'file' not in request.files:
+        logger.error("No file part in request")
+        return jsonify({'error': 'No file part in the request'}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        logger.error("No file selected")
+        return jsonify({'error': 'No file selected'}), 400
+    
+    filename = f"upload_{uuid.uuid4()}{os.path.splitext(file.filename)[1]}"
+    filepath = os.path.join(UPLOAD_FOLDER, filename)
+    try:
+        file.save(filepath)
+        logger.info(f"File saved to {filepath}")
+    except Exception as e:
+        logger.error(f"Failed to save file: {str(e)}")
+        return jsonify({'error': f"Failed to save file: {str(e)}"}), 500
+    
+    if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+        result_url, results = process_image(filepath)
+        if result_url:
+            logger.info(f"Image processed successfully: {result_url}")
+            return jsonify({
+                'result_url': result_url,
+                'results': results,
+                'message': 'Image processed successfully'
+            })
+        else:
+            logger.error(f"Image processing failed: {results}")
+            return jsonify({'error': results}), 500
+    elif filename.lower().endswith(('.mp4', '.avi')):
+        result_url, results = process_video(filepath)
+        if result_url:
+            logger.info(f"Video processed successfully: {result_url}")
+            return jsonify({
+                'result_url': result_url,
+                'results': results,
+                'message': 'Video processed successfully'
+            })
+        else:
+            logger.error(f"Video processing failed: {results}")
+            return jsonify({'error': results}), 500
+    else:
+        logger.error(f"Unsupported file type: {filename}")
+        return jsonify({'error': 'Unsupported file type'}), 400
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({'status': 'healthy', 'model_loaded': crack_model is not None})
+
+@app.route('/results/<filename>')
+def serve_result(filename):
+    return send_from_directory(RESULTS_FOLDER, filename)
+
+# Catch-all route for frontend (place AFTER specific API routes)
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
-def catch_all(path):
-    # Add simple health check endpoint for debugging
-    if path == "health":
-        return jsonify({"status": "healthy"})
-        
-    # For API endpoints
-    if path.startswith('api/'):
-        # These will be handled by their specific route handlers
-        return app.view_functions[path.split('/')[-1]](path)
-        
-    # For result images
-    if path.startswith('results/'):
-        return send_from_directory('static/results', path.replace('results/', ''))
-        
-    # For other static files (JS, CSS, etc.)
+def serve_frontend(path):
+    # Explicitly exclude API and results routes
+    if path.startswith('api/') or path.startswith('results/'):
+        return "Method Not Allowed", 405  # Fallback if route isn't found
     if path and os.path.exists(os.path.join('build', path)):
         return send_from_directory('build', path)
-        
-    # Default: serve index.html for client-side routing
     return send_from_directory('build', 'index.html')
 
 # Initialize the app
 initialize()
 
-# Gunicorn configuration for Render
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=port)
